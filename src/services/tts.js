@@ -58,7 +58,6 @@ export async function getEndpoint() {
 
     } catch (error) {
         console.error("获取endpoint失败:", error);
-        // 如果有缓存的token，即使过期也尝试使用
         if (tokenInfo.token) {
             console.log("使用过期的缓存token");
             return tokenInfo.endpoint;
@@ -67,16 +66,17 @@ export async function getEndpoint() {
     }
 }
 
-// 获取单个音频数据（增强错误处理和重试机制）
+// 获取单个音频数据 (MODIFICADO: nuevo host y autenticación)
 export async function getAudioChunk(text, voiceName, rate, pitch, volume, style, outputFormat = DEFAULT_OUTPUT_FORMAT, maxRetries = MAX_RETRIES) {
     const retryDelay = RETRY_DELAY_MS;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
             const endpoint = await getEndpoint();
-            const url = `https://${endpoint.r}.tts.speech.microsoft.com/cognitiveservices/v1`;
+            
+            // ⚠️ CAMBIO 1: Nuevo host de Microsoft
+            const url = `https://api.msedgeservices.com/tts/cognitiveservices/v1?Ocp-Apim-Subscription-Key=${endpoint.t}`;
 
-            // 处理文本中的延迟标记
             let m = text.match(/\[(\d+)\]\s*?$/);
             let slien = 0;
             if (m && m.length == 2) {
@@ -84,7 +84,6 @@ export async function getAudioChunk(text, voiceName, rate, pitch, volume, style,
                 text = text.replace(m[0], '');
             }
 
-            // 验证文本长度
             if (!text.trim()) {
                 throw new Error("文本块为空");
             }
@@ -96,8 +95,9 @@ export async function getAudioChunk(text, voiceName, rate, pitch, volume, style,
             const response = await fetch(url, {
                 method: "POST",
                 headers: {
-                    "Authorization": endpoint.t,
+                    // ⚠️ CAMBIO 2: Ya no se usa "Authorization", ahora va en la URL
                     "Content-Type": "application/ssml+xml",
+                    // ⚠️ CAMBIO 3: User-Agent de Edge (esencial para el nuevo host)
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36 Edg/127.0.0.0",
                     "X-Microsoft-OutputFormat": outputFormat
                 },
@@ -107,9 +107,7 @@ export async function getAudioChunk(text, voiceName, rate, pitch, volume, style,
             if (!response.ok) {
                 const errorText = await response.text();
 
-                // 根据错误类型决定是否重试
                 if (response.status === 429) {
-                    // 频率限制，需要重试
                     if (attempt < maxRetries) {
                         console.log(`频率限制，第${attempt + 1}次重试，等待${retryDelay * (attempt + 1)}ms`);
                         await delay(retryDelay * (attempt + 1));
@@ -117,7 +115,6 @@ export async function getAudioChunk(text, voiceName, rate, pitch, volume, style,
                     }
                     throw new Error(`请求频率过高，已重试${maxRetries}次仍失败`);
                 } else if (response.status >= 500) {
-                    // 服务器错误，可以重试
                     if (attempt < maxRetries) {
                         console.log(`服务器错误，第${attempt + 1}次重试，等待${retryDelay * (attempt + 1)}ms`);
                         await delay(retryDelay * (attempt + 1));
@@ -125,7 +122,6 @@ export async function getAudioChunk(text, voiceName, rate, pitch, volume, style,
                     }
                     throw new Error(`Edge TTS服务器错误: ${response.status} ${errorText}`);
                 } else {
-                    // 客户端错误，不重试
                     throw new Error(`Edge TTS API错误: ${response.status} ${errorText}`);
                 }
             }
@@ -134,18 +130,15 @@ export async function getAudioChunk(text, voiceName, rate, pitch, volume, style,
 
         } catch (error) {
             if (attempt === maxRetries) {
-                // 最后一次重试失败
                 throw new Error(`音频生成失败（已重试${maxRetries}次）: ${error.message}`);
             }
 
-            // 如果是网络错误或其他可重试错误
             if (error.message.includes('fetch') || error.message.includes('network')) {
                 console.log(`网络错误，第${attempt + 1}次重试，等待${retryDelay * (attempt + 1)}ms`);
                 await delay(retryDelay * (attempt + 1));
                 continue;
             }
 
-            // 其他错误直接抛出
             throw error;
         }
     }
@@ -159,7 +152,6 @@ export async function processBatchedAudioChunks(chunks, voiceName, rate, pitch, 
         const batch = chunks.slice(i, i + batchSize);
         const batchPromises = batch.map(async (chunk, index) => {
             try {
-                // 为每个请求添加小延迟，避免同时发送
                 if (index > 0) {
                     await delay(index * 200);
                 }
@@ -174,7 +166,6 @@ export async function processBatchedAudioChunks(chunks, voiceName, rate, pitch, 
             const batchResults = await Promise.all(batchPromises);
             audioChunks.push(...batchResults);
 
-            // 批次间延迟
             if (i + batchSize < chunks.length) {
                 await delay(delayMs);
             }
@@ -190,13 +181,11 @@ export async function processBatchedAudioChunks(chunks, voiceName, rate, pitch, 
 // 主要的 TTS 函数
 export async function getVoice(text, voiceName, rate, pitch, volume, style, outputFormat = DEFAULT_OUTPUT_FORMAT) {
     try {
-        // 文本预处理
         const cleanText = text.trim();
         if (!cleanText) {
             throw new Error("文本内容为空");
         }
 
-        // 如果文本很短，直接处理
         if (cleanText.length <= 1500) {
             const audioBlob = await getAudioChunk(cleanText, voiceName, rate, pitch, volume, style, outputFormat);
             return new Response(audioBlob, {
@@ -207,17 +196,14 @@ export async function getVoice(text, voiceName, rate, pitch, volume, style, outp
             });
         }
 
-        // 优化的文本分块
         const chunks = optimizedTextSplit(cleanText, 1500);
 
-        // 检查分块数量，防止超过CloudFlare限制
         if (chunks.length > MAX_CHUNKS) {
             throw new Error(`文本过长，分块数量(${chunks.length})超过限制。请缩短文本或分批处理。`);
         }
 
         console.log(`文本已分为 ${chunks.length} 个块进行处理`);
 
-        // 批量处理音频块，控制并发数量和频率
         const audioChunks = await processBatchedAudioChunks(
             chunks,
             voiceName,
@@ -230,7 +216,6 @@ export async function getVoice(text, voiceName, rate, pitch, volume, style, outp
             BATCH_DELAY_MS
         );
 
-        // 将音频片段拼接起来
         const concatenatedAudio = new Blob(audioChunks, { type: 'audio/mpeg' });
         return new Response(concatenatedAudio, {
             headers: {
