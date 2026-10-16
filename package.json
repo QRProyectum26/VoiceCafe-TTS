@@ -17,6 +17,9 @@
   ],
   "author": "Raincarnator",
   "license": "MIT",
+  "dependencies": {
+    "edge-tts-universal": "^1.4.0"
+  },
   "devDependencies": {
     "wrangler": "^3.0.0"
   }
